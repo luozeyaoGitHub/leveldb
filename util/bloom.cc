@@ -26,6 +26,7 @@ class BloomFilterPolicy : public FilterPolicy {
   const char* Name() const override { return "leveldb.BuiltinBloomFilter2"; }
 
   void CreateFilter(const Slice* keys, int n, std::string* dst) const override {
+    // S1 首先根据key个数分配filter空间，并圆整到8byte
     // Compute bloom filter size (in both bits and bytes)
     size_t bits = n * bits_per_key_;
 
@@ -38,15 +39,23 @@ class BloomFilterPolicy : public FilterPolicy {
 
     const size_t init_size = dst->size();
     dst->resize(init_size + bytes, 0);
+    
+    // S2 在filter最后的字节位压入hash函数个数
     dst->push_back(static_cast<char>(k_));  // Remember # of probes in filter
+
+    // S3 对于每个key，使用double-hashing生产一系列的hash值h(K_个)，设置bits array的第h位=1
     char* array = &(*dst)[init_size];
     for (int i = 0; i < n; i++) {
       // Use double-hashing to generate a sequence of hash values.
       // See analysis in [Kirsch,Mitzenmacher 2006].
-      uint32_t h = BloomHash(keys[i]);
-      const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
-      for (size_t j = 0; j < k_; j++) {
-        const uint32_t bitpos = h % bits;
+
+      //  h(i, k) = (h1(k) + i*h2(k)) mod |T|
+      //  Gi(x)=H1(x)+iH2(x)
+      //  H2(x)=(H1(x)>>17) | (H1(x)<<15)
+      uint32_t h = BloomHash(keys[i]); // h1函数
+      const uint32_t delta = (h >> 17) | (h << 15);  // h2函数，Rotate right 17 bits
+      for (size_t j = 0; j < k_; j++) {   // double-hashing 生产k_个hash值
+        const uint32_t bitpos = h % bits; // 在bits array上设置第bitpos位
         array[bitpos / 8] |= (1 << (bitpos % 8));
         h += delta;
       }
@@ -54,6 +63,7 @@ class BloomFilterPolicy : public FilterPolicy {
   }
 
   bool KeyMayMatch(const Slice& key, const Slice& bloom_filter) const override {
+    // S1 准备工作，并做些基本判断
     const size_t len = bloom_filter.size();
     if (len < 2) return false;
 
@@ -68,7 +78,8 @@ class BloomFilterPolicy : public FilterPolicy {
       // Consider it a match.
       return true;
     }
-
+    // S2 计算key的hash值，重复计算阶段的步骤，循环计算k个hash值，
+    //    只要有一个结果对应的bit位为0，就认为不匹配，否则认为匹配
     uint32_t h = BloomHash(key);
     const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
     for (size_t j = 0; j < k; j++) {
@@ -80,8 +91,8 @@ class BloomFilterPolicy : public FilterPolicy {
   }
 
  private:
-  size_t bits_per_key_;
-  size_t k_;
+  size_t bits_per_key_;  // 对于n个key，其hash table的大小就是bits_per_key_
+  size_t k_; //变量k_实际上就是模拟的hash函数的个数
 };
 }  // namespace
 

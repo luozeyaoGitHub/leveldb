@@ -98,11 +98,12 @@ void InternalKeyComparator::FindShortSuccessor(std::string* key) const {
 
 const char* InternalFilterPolicy::Name() const { return user_policy_->Name(); }
 
+// 从InternalKey拆分得到user key，然后在user key上做FilterPolicy的操作
 void InternalFilterPolicy::CreateFilter(const Slice* keys, int n,
                                         std::string* dst) const {
   // We rely on the fact that the code in table.cc does not mind us
   // adjusting keys[].
-  Slice* mkey = const_cast<Slice*>(keys);
+  Slice* mkey = const_cast<Slice*>(keys);// 类型转换，去cost限定符
   for (int i = 0; i < n; i++) {
     mkey[i] = ExtractUserKey(keys[i]);
     // TODO(sanjay): Suppress dups?

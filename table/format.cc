@@ -63,12 +63,14 @@ Status Footer::DecodeFrom(Slice* input) {
 
 Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
                  const BlockHandle& handle, BlockContents* result) {
+  // S1 初始化结果result，BlockContents是一个有3个成员的结构体
   result->data = Slice();
   result->cachable = false;
   result->heap_allocated = false;
 
   // Read the block contents as well as the type/crc footer.
   // See table_builder.cc for the code that built this structure.
+  // S2 根据handle指定的偏移和大小，读取block内容，type和crc32值
   size_t n = static_cast<size_t>(handle.size());
   char* buf = new char[n + kBlockTrailerSize];
   Slice contents;
@@ -83,6 +85,7 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
   }
 
   // Check the crc of the type and the block contents
+  // S3 如果option要校验CRC32，则计算content + type的CRC32并校验
   const char* data = contents.data();  // Pointer to where Read put the data
   if (options.verify_checksums) {
     const uint32_t crc = crc32c::Unmask(DecodeFixed32(data + n + 1));
@@ -93,13 +96,16 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
       return s;
     }
   }
-
+  // S4 最后根据type指定的存储类型，如果是非压缩的，则直接取数据赋给result，
+  //    否则先解压，把解压结果赋给result，目前支持的是snappy压缩。
   switch (data[n]) {
     case kNoCompression:
       if (data != buf) {
         // File implementation gave us pointer to some other data.
         // Use it directly under the assumption that it will be live
         // while the file is open.
+        // 文件的Read接口返回的Slice结果，其data指针可能没有使用我们传入的buf，
+        // 如果没有，那么释放Slice的data指针就是我们的事情，否则就是文件来管理的
         delete[] buf;
         result->data = Slice(data, n);
         result->heap_allocated = false;

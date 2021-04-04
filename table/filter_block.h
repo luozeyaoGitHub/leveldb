@@ -34,19 +34,22 @@ class FilterBlockBuilder {
   FilterBlockBuilder(const FilterBlockBuilder&) = delete;
   FilterBlockBuilder& operator=(const FilterBlockBuilder&) = delete;
 
+  // 开始构建新的filter block，TableBuilder在构造函数和Flush中调用
   void StartBlock(uint64_t block_offset);
+  // 添加key，TableBuilder每次向data block中加入key时调用
   void AddKey(const Slice& key);
-  Slice Finish();
+  // 结束构建，TableBuilder在结束对table的构建时调用
+  Slice Finish();  
 
  private:
   void GenerateFilter();
 
-  const FilterPolicy* policy_;
+  const FilterPolicy* policy_;    // filter类型，构造函数参数指定
   std::string keys_;             // Flattened key contents
-  std::vector<size_t> start_;    // Starting index in keys_ of each key
-  std::string result_;           // Filter data computed so far
-  std::vector<Slice> tmp_keys_;  // policy_->CreateFilter() argument
-  std::vector<uint32_t> filter_offsets_;
+  std::vector<size_t> start_;    // Starting index in keys_ of each key // 各key在keys_中的位置
+  std::string result_;           // Filter data computed so far // 当前计算出的filter data
+  std::vector<Slice> tmp_keys_;  // policy_->CreateFilter() argument // policy_->CreateFilter()参数
+  std::vector<uint32_t> filter_offsets_;  // 各个filter在result_中的位置
 };
 
 class FilterBlockReader {
@@ -57,9 +60,9 @@ class FilterBlockReader {
 
  private:
   const FilterPolicy* policy_;
-  const char* data_;    // Pointer to filter data (at block-start)
-  const char* offset_;  // Pointer to beginning of offset array (at block-end)
-  size_t num_;          // Number of entries in offset array
+  const char* data_;    // Pointer to filter data (at block-start)// filter data指针 (at block-start)
+  const char* offset_;  // Pointer to beginning of offset array (at block-end)// offset array的开始地址 (at block-end)
+  size_t num_;          // Number of entries in offset array // offset array元素个数
   size_t base_lg_;      // Encoding parameter (see kFilterBaseLg in .cc file)
 };
 

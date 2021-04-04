@@ -41,11 +41,14 @@ TableCache::~TableCache() { delete cache_; }
 Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
                              Cache::Handle** handle) {
   Status s;
+  // S1 首先根据file number从cache中查找table，找到就直接返回成功
   char buf[sizeof(file_number)];
   EncodeFixed64(buf, file_number);
   Slice key(buf, sizeof(buf));
   *handle = cache_->Lookup(key);
+  // S2 如果没有找到，说明table不在cache中，则根据file number和db name打开一个RadomAccessFile。
   if (*handle == nullptr) {
+    // Table文件格式为：<db name>.<filenumber(%6u)>.sst。如果文件打开成功，则调用Table::Open读取sstable文件。
     std::string fname = TableFileName(dbname_, file_number);
     RandomAccessFile* file = nullptr;
     Table* table = nullptr;
@@ -59,7 +62,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     if (s.ok()) {
       s = Table::Open(options_, file, file_size, &table);
     }
-
+    // S3 如果Table::Open成功则，插入到Cache中
     if (!s.ok()) {
       assert(table == nullptr);
       delete file;
@@ -78,6 +81,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
 Iterator* TableCache::NewIterator(const ReadOptions& options,
                                   uint64_t file_number, uint64_t file_size,
                                   Table** tableptr) {
+  // S1 初始化tableptr，调用FindTable，返回cache对象
   if (tableptr != nullptr) {
     *tableptr = nullptr;
   }
@@ -87,7 +91,7 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
   if (!s.ok()) {
     return NewErrorIterator(s);
   }
-
+  // S2 从cache对象中取出Table对象指针，调用其NewIterator返回Iterator对象，并为Iterator注册一个cleanup函数
   Table* table = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
   Iterator* result = table->NewIterator(options);
   result->RegisterCleanup(&UnrefEntry, cache_, handle);
@@ -112,6 +116,7 @@ Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
 }
 
 void TableCache::Evict(uint64_t file_number) {
+  // 该函数用以清除指定文件所有cache的entry，函数实现很简单，就是根据file number清除cache对象。
   char buf[sizeof(file_number)];
   EncodeFixed64(buf, file_number);
   cache_->Erase(Slice(buf, sizeof(buf)));

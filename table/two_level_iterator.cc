@@ -57,14 +57,14 @@ class TwoLevelIterator : public Iterator {
   void SetDataIterator(Iterator* data_iter);
   void InitDataBlock();
 
-  BlockFunction block_function_;
-  void* arg_;
-  const ReadOptions options_;
-  Status status_;
-  IteratorWrapper index_iter_;
-  IteratorWrapper data_iter_;  // May be nullptr
-  // If data_iter_ is non-null, then "data_block_handle_" holds the
-  // "index_value" passed to block_function_ to create the data_iter_.
+  BlockFunction block_function_; // block操作函数
+  void* arg_;  // BlockFunction的自定义参数
+  const ReadOptions options_; // BlockFunction的read option参数
+  Status status_;  // 当前状态
+  IteratorWrapper index_iter_; // 遍历block的迭代器
+  IteratorWrapper data_iter_; // May be NULL-遍历block data的迭代器
+  // 如果data_iter_ != NULL，data_block_handle_保存的是传递给
+  // block_function_的index value，以用来创建data_iter_
   std::string data_block_handle_;
 };
 
@@ -81,37 +81,37 @@ TwoLevelIterator::~TwoLevelIterator() = default;
 
 void TwoLevelIterator::Seek(const Slice& target) {
   index_iter_.Seek(target);
-  InitDataBlock();
-  if (data_iter_.iter() != nullptr) data_iter_.Seek(target);
-  SkipEmptyDataBlocksForward();
+  InitDataBlock(); // 根据index iter设置data iter
+  if (data_iter_.iter() != NULL)  data_iter_.Seek(target); // 调整data iter跳转到target
+  SkipEmptyDataBlocksForward(); // 调整iter，跳过空的block
 }
-
+ 
 void TwoLevelIterator::SeekToFirst() {
   index_iter_.SeekToFirst();
-  InitDataBlock();
-  if (data_iter_.iter() != nullptr) data_iter_.SeekToFirst();
-  SkipEmptyDataBlocksForward();
+  InitDataBlock();// 根据index iter设置data iter
+  if (data_iter_.iter() != NULL)  data_iter_.SeekToFirst();
+  SkipEmptyDataBlocksForward();// 调整iter，跳过空的block
 }
-
+ 
 void TwoLevelIterator::SeekToLast() {
   index_iter_.SeekToLast();
-  InitDataBlock();
-  if (data_iter_.iter() != nullptr) data_iter_.SeekToLast();
-  SkipEmptyDataBlocksBackward();
+  InitDataBlock();// 根据index iter设置data iter
+  if (data_iter_.iter() != NULL)  data_iter_.SeekToLast();
+  SkipEmptyDataBlocksBackward();// 调整iter，跳过空的block
 }
-
+ 
 void TwoLevelIterator::Next() {
   assert(Valid());
   data_iter_.Next();
-  SkipEmptyDataBlocksForward();
+  SkipEmptyDataBlocksForward();// 调整iter，跳过空的block
 }
-
+ 
 void TwoLevelIterator::Prev() {
   assert(Valid());
   data_iter_.Prev();
-  SkipEmptyDataBlocksBackward();
+  SkipEmptyDataBlocksBackward();// 调整iter，跳过空的block
 }
-
+// S2.2 SkipEmptyDataBlocksForward，向前跳过空的datablock
 void TwoLevelIterator::SkipEmptyDataBlocksForward() {
   while (data_iter_.iter() == nullptr || !data_iter_.Valid()) {
     // Move to next block
@@ -124,7 +124,7 @@ void TwoLevelIterator::SkipEmptyDataBlocksForward() {
     if (data_iter_.iter() != nullptr) data_iter_.SeekToFirst();
   }
 }
-
+// S2.3 SkipEmptyDataBlocksBackward，向后跳过空的datablock
 void TwoLevelIterator::SkipEmptyDataBlocksBackward() {
   while (data_iter_.iter() == nullptr || !data_iter_.Valid()) {
     // Move to next block
@@ -142,7 +142,8 @@ void TwoLevelIterator::SetDataIterator(Iterator* data_iter) {
   if (data_iter_.iter() != nullptr) SaveError(data_iter_.status());
   data_iter_.Set(data_iter);
 }
-
+// S2.1首先是InitDataBlock()，它是根据index_iter来初始化data_iter，
+//     当定位到新的block时，需要更新data Iterator，指向该block中k/v对的合适位置，
 void TwoLevelIterator::InitDataBlock() {
   if (!index_iter_.Valid()) {
     SetDataIterator(nullptr);

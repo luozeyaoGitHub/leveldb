@@ -1,3 +1,11 @@
+<!--
+ * @Author: your name
+ * @Date: 2021-03-20 12:11:53
+ * @LastEditTime: 2021-03-25 13:29:29
+ * @LastEditors: Please set LastEditors
+ * @Description: In User Settings Edit
+ * @FilePath: \leveldb\doc\log_format.md
+-->
 leveldb Log format
 ==================
 The log file contents are a sequence of 32KB blocks.  The only exception is that
@@ -31,7 +39,7 @@ do not understand, others may report that some data was skipped.
 
 The FULL record contains the contents of an entire user record.
 
-FIRST, MIDDLE, LAST are types used for user records that have been split into
+ are types used for user records that have been split into
 multiple fragments (typically because of block boundaries).  FIRST is the type
 of the first fragment of a user record, LAST is the type of the last fragment of
 a user record, and MIDDLE is the type of all interior fragments of a user

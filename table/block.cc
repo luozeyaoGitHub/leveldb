@@ -52,6 +52,8 @@ Block::~Block() {
 //
 // If any errors are detected, returns nullptr.  Otherwise, returns a
 // pointer to the key delta (just past the three decoded values).
+
+// 从字符串[p, limit)解析出key的前缀长度、key前缀之后的字符串长度和value的长度这三个vint32值
 static inline const char* DecodeEntry(const char* p, const char* limit,
                                       uint32_t* shared, uint32_t* non_shared,
                                       uint32_t* value_length) {
@@ -76,14 +78,14 @@ static inline const char* DecodeEntry(const char* p, const char* limit,
 
 class Block::Iter : public Iterator {
  private:
-  const Comparator* const comparator_;
-  const char* const data_;       // underlying block contents
-  uint32_t const restarts_;      // Offset of restart array (list of fixed32)
-  uint32_t const num_restarts_;  // Number of uint32_t entries in restart array
+  const Comparator* const comparator_; // key 比较器
+  const char* const data_;       // underlying block contents // block内容
+  uint32_t const restarts_;      // Offset of restart array (list of fixed32)//重启点(uint32数组)在data中的偏移
+  uint32_t const num_restarts_;  // Number of uint32_t entries in restart array//重启点个数
 
   // current_ is offset in data_ of current entry.  >= restarts_ if !Valid
-  uint32_t current_;
-  uint32_t restart_index_;  // Index of restart block in which current_ falls
+  uint32_t current_;  // 当前entry在data中的偏移.  >= restarts_表明非法
+  uint32_t restart_index_;  // Index of restart block in which current_ falls// current_所在的重启点的index
   std::string key_;
   Slice value_;
   Status status_;
@@ -96,7 +98,7 @@ class Block::Iter : public Iterator {
   inline uint32_t NextEntryOffset() const {
     return (value_.data() + value_.size()) - data_;
   }
-
+  // 从data中读取指定restart index的偏移值restart[index]
   uint32_t GetRestartPoint(uint32_t index) {
     assert(index < num_restarts_);
     return DecodeFixed32(data_ + restarts_ + index * sizeof(uint32_t));
@@ -144,6 +146,7 @@ class Block::Iter : public Iterator {
     assert(Valid());
 
     // Scan backwards to a restart point before current_
+    // S1 首先向前回跳到在current_前面的那个重启点，并定位到重启点的k/v对开始位置
     const uint32_t original = current_;
     while (GetRestartPoint(restart_index_) >= original) {
       if (restart_index_ == 0) {
@@ -155,9 +158,10 @@ class Block::Iter : public Iterator {
       restart_index_--;
     }
 
-    SeekToRestartPoint(restart_index_);
+    SeekToRestartPoint(restart_index_);//根据restart index定位到重启点的k/v对
     do {
       // Loop until end of current entry hits the start of original entry
+      // S2 从重启点位置开始向后遍历，直到遇到original前面的那个k/v对
     } while (ParseNextKey() && NextEntryOffset() < original);
   }
 
@@ -183,7 +187,7 @@ class Block::Iter : public Iterator {
         return;
       }
     }
-
+    // S1 二分查找，找到key < target的最后一个重启点，典型的二分查找算法
     while (left < right) {
       uint32_t mid = (left + right + 1) / 2;
       uint32_t region_offset = GetRestartPoint(mid);
@@ -216,6 +220,7 @@ class Block::Iter : public Iterator {
       SeekToRestartPoint(left);
     }
     // Linear search (within restart block) for first key >= target
+    //S3 自重启点线性向下，直到遇到key>= target的k/v对
     while (true) {
       if (!ParseNextKey()) {
         return;
@@ -239,6 +244,7 @@ class Block::Iter : public Iterator {
   }
 
  private:
+  // 将current_和restart_index_都设置为invalid状态，并在status中设置错误状态
   void CorruptionError() {
     current_ = restarts_;
     restart_index_ = num_restarts_;
@@ -248,6 +254,8 @@ class Block::Iter : public Iterator {
   }
 
   bool ParseNextKey() {
+    // S1 跳到下一个entry，其位置紧邻在当前value_之后。
+    //    如果已经是最后一个entry了，返回false，标记current_为invalid    
     current_ = NextEntryOffset();
     const char* p = data_ + current_;
     const char* limit = data_ + restarts_;  // Restarts come right after data
@@ -259,6 +267,8 @@ class Block::Iter : public Iterator {
     }
 
     // Decode next entry
+    // S2 解析出entry，解析出错则设置错误状态，记录错误并返回false。
+    //    解析成功则根据信息组成key和value，并更新重启点index
     uint32_t shared, non_shared, value_length;
     p = DecodeEntry(p, limit, &shared, &non_shared, &value_length);
     if (p == nullptr || key_.size() < shared) {
