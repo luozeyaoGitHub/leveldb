@@ -93,16 +93,21 @@ class LEVELDB_EXPORT DB {
   //
   // Caller should delete the iterator when it is no longer needed.
   // The returned iterator should be deleted before this db is deleted.
+  // 返回heap分配的iterator，访问db的内容，返回的iterator的位置是invalid的
+  // 在使用之前，调用者必须先调用Seek。
   virtual Iterator* NewIterator(const ReadOptions& options) = 0;
 
   // Return a handle to the current DB state.  Iterators created with
   // this handle will all observe a stable snapshot of the current DB
   // state.  The caller must call ReleaseSnapshot(result) when the
   // snapshot is no longer needed.
+  // 返回当前db状态的handle，和handle一起创建的Iterator看到的都是
+  // 当前db状态的稳定快照。不再使用时，应该调用ReleaseSnapshot(result)
   virtual const Snapshot* GetSnapshot() = 0;
 
   // Release a previously acquired snapshot.  The caller must not
   // use "snapshot" after this call.
+  // 释放获取的db快照
   virtual void ReleaseSnapshot(const Snapshot* snapshot) = 0;
 
   // DB implementations can export properties about their state
@@ -115,12 +120,16 @@ class LEVELDB_EXPORT DB {
   //
   //  "leveldb.num-files-at-level<N>" - return the number of files at level <N>,
   //     where <N> is an ASCII representation of a level number (e.g. "0").
+  //     返回level <N>的文件个数
   //  "leveldb.stats" - returns a multi-line string that describes statistics
   //     about the internal operation of the DB.
+  //     返回描述db内部操作统计的多行string
   //  "leveldb.sstables" - returns a multi-line string that describes all
   //     of the sstables that make up the db contents.
+  //     返回一个多行string，描述构成db内容的所有sstable
   //  "leveldb.approximate-memory-usage" - returns the approximate number of
   //     bytes of memory in use by the DB.
+  //     返回当前DB大约占用的内存
   virtual bool GetProperty(const Slice& property, std::string* value) = 0;
 
   // For each i in [0,n-1], store in "sizes[i]", the approximate
@@ -131,6 +140,10 @@ class LEVELDB_EXPORT DB {
   // sizes will be one-tenth the size of the corresponding user data size.
   //
   // The results may not include the sizes of recently written data.
+  // "sizes[i]"保存的是"[range[i].start.. range[i].limit)"中的key使用的文件空间.
+  // 注：返回的是文件系统的使用空间大概值，
+  //     如果用户数据以10倍压缩，那么返回值就是对应用户数据的1/10
+  //     结果可能不包含最近写入的数据大小.
   virtual void GetApproximateSizes(const Range* range, int n,
                                    uint64_t* sizes) = 0;
 
@@ -144,6 +157,13 @@ class LEVELDB_EXPORT DB {
   // end==nullptr is treated as a key after all keys in the database.
   // Therefore the following call will compact the entire database:
   //    db->CompactRange(nullptr, nullptr);
+  // Compactkey范围[*begin,*end]的底层存储，删除和被覆盖的版本将会被抛弃
+  // 数据会被重新组织，以减少访问开销
+  // 注：那些不了解底层实现的用户不应该调用该方法。
+  // begin==NULL被当作db中所有key之前的key.
+  // end==NULL被当作db中所有key之后的key.
+  // 所以下面的调用将会compact整个db:
+  //    db->CompactRange(NULL, NULL);
   virtual void CompactRange(const Slice* begin, const Slice* end) = 0;
 };
 
@@ -152,6 +172,8 @@ class LEVELDB_EXPORT DB {
 //
 // Note: For backwards compatibility, if DestroyDB is unable to list the
 // database files, Status::OK() will still be returned masking this failure.
+// 最后是两个全局函数--删除和修复DB
+// 要小心，该方法将删除指定db的所有内容
 LEVELDB_EXPORT Status DestroyDB(const std::string& name,
                                 const Options& options);
 
@@ -159,6 +181,8 @@ LEVELDB_EXPORT Status DestroyDB(const std::string& name,
 // resurrect as much of the contents of the database as possible.
 // Some data may be lost, so be careful when calling this function
 // on a database that contains important information.
+// 如果db不能打开了，你可能调用该方法尝试纠正尽可能多的数据
+// 可能会丢失数据，所以调用时要小心
 LEVELDB_EXPORT Status RepairDB(const std::string& dbname,
                                const Options& options);
 
