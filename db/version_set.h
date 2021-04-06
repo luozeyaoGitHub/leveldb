@@ -70,6 +70,7 @@ class Version {
   // Append to *iters a sequence of iterators that will
   // yield the contents of this Version when merged together.
   // REQUIRES: This version has been saved (see VersionSet::SaveTo)
+  // 追加一系列iterator到 @*iters中，将在merge到一起时生成该Version的内容
   void AddIterators(const ReadOptions&, std::vector<Iterator*>* iters);
 
   Status Get(const ReadOptions&, const LookupKey& key, std::string* val,
@@ -78,6 +79,8 @@ class Version {
   // Adds "stats" into the current state.  Returns true if a new
   // compaction may need to be triggered, false otherwise.
   // REQUIRES: lock is held
+  // 把@stats加入到当前状态中，如果需要触发新的compaction返回true
+  // 要求：hold lock
   bool UpdateStats(const GetStats& stats);
 
   // Record a sample of bytes read at the specified internal key.
@@ -101,14 +104,17 @@ class Version {
   // some part of [*smallest_user_key,*largest_user_key].
   // smallest_user_key==nullptr represents a key smaller than all the DB's keys.
   // largest_user_key==nullptr represents a key largest than all the DB's keys.
+  // 如果指定level中的某些文件和[*smallest_user_key,*largest_user_key]有重合就返回true。
   bool OverlapInLevel(int level, const Slice* smallest_user_key,
                       const Slice* largest_user_key);
 
   // Return the level at which we should place a new memtable compaction
   // result that covers the range [smallest_user_key,largest_user_key].
+  // 返回我们应该在哪个level上放置新的memtable compaction，
+  // 该compaction覆盖了范围[smallest_user_key,largest_user_key].
   int PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                  const Slice& largest_user_key);
-
+  // 指定level的sstable个数
   int NumFiles(int level) const { return files_[level].size(); }
 
   // Return a human readable string that describes this version's contents.

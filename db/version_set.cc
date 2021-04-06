@@ -124,6 +124,7 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
                            const Slice* smallest_user_key,
                            const Slice* largest_user_key) {
   const Comparator* ucmp = icmp.user_comparator();
+  // 1 对于乱序的、可能有交集的文件集合，需要逐个查找，找到有重合的就返回true；
   if (!disjoint_sorted_files) {
     // Need to check against all files
     for (size_t i = 0; i < files.size(); i++) {
@@ -137,7 +138,7 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
     }
     return false;
   }
-
+  // 2 disjoint_sorted_files == true，表明文件集合是互不相交、有序的
   // Binary search over file list
   uint32_t index = 0;
   if (smallest_user_key != nullptr) {
@@ -149,10 +150,11 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
 
   if (index >= files.size()) {
     // beginning of range is after all files, so no overlap.
+    // 不存在比smallest_user_key小的key
     return false;
   }
 
-  return !BeforeFile(ucmp, largest_user_key, files[index]);
+  return !BeforeFile(ucmp, largest_user_key, files[index]);//保证在largest_user_key之后
 }
 
 // An internal iterator.  For a given version/level pair, yields
@@ -160,8 +162,14 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
 // is the largest key that occurs in the file, and value() is an
 // 16-byte value containing the file number and file size, both
 // encoded using EncodeFixed64.
+// 这也是一个继承者Iterator的子类，一个内部Iterator。给定一个version/level对，生成该level内的文件信息。
+// 对于给定的entry:
+// key()返回的是文件中所包含的最大的key
+// value()返回的是|file number(8 bytes)|file size(8 bytes)|串。
 class Version::LevelFileNumIterator : public Iterator {
  public:
+  //两个参数：InternalKeyComparator& icmp，用于key的比较；
+  //         vector<FileMetaData*>* flist，指向version的所有sstable文件列表 //
   LevelFileNumIterator(const InternalKeyComparator& icmp,
                        const std::vector<FileMetaData*>* flist)
       : icmp_(icmp), flist_(flist), index_(flist->size()) {  // Marks as invalid
@@ -214,8 +222,8 @@ static Iterator* GetFileIterator(void* arg, const ReadOptions& options,
     return NewErrorIterator(
         Status::Corruption("FileReader invoked with unexpected value"));
   } else {
-    return cache->NewIterator(options, DecodeFixed64(file_value.data()),
-                              DecodeFixed64(file_value.data() + 8));
+    return cache->NewIterator(options, DecodeFixed64(file_value.data()),  //filenumber
+                              DecodeFixed64(file_value.data() + 8));  //filesize
   }
 }
 
@@ -225,18 +233,21 @@ Iterator* Version::NewConcatenatingIterator(const ReadOptions& options,
       new LevelFileNumIterator(vset_->icmp_, &files_[level]), &GetFileIterator,
       vset_->table_cache_, options);
 }
-
+// 该函数最终在DB::NewIterators()接口中被调用
+// 调用层次为：DBImpl::NewIterator()->DBImpl::NewInternalIterator()->Version::AddIterators()
+// 函数功能是为该Version中的所有sstable都创建一个Two Level Iterator，以遍历sstable的内容
 void Version::AddIterators(const ReadOptions& options,
                            std::vector<Iterator*>* iters) {
   // Merge all level zero files together since they may overlap
+  // S1 对于level == 0 级别的sstable文件，直接装入cache，level0的sstable文件可能有重合，需要merge
   for (size_t i = 0; i < files_[0].size(); i++) {
     iters->push_back(vset_->table_cache_->NewIterator(
         options, files_[0][i]->number, files_[0][i]->file_size));
   }
 
   // For levels > 0, we can use a concatenating iterator that sequentially
-  // walks through the non-overlapping files in the level, opening them
-  // lazily.
+  // walks through the non-overlapping files in the level, opening them lazily.
+  // S2 对于level > 0 级别的sstable文件，lazy open机制，它们不会有重叠
   for (int level = 1; level < config::kNumLevels; level++) {
     if (!files_[level].empty()) {
       iters->push_back(NewConcatenatingIterator(options, level));
@@ -259,6 +270,9 @@ struct Saver {
   std::string* value;
 };
 }  // namespace
+
+// 首先解析Table传入的InternalKey，然后根据指定的Comparator判断user key是否是要查找的user key
+// 如果是并且type是kTypeValue，则设置到Saver::*value中，并返回kFound，否则返回kDeleted
 static void SaveValue(void* arg, const Slice& ikey, const Slice& v) {
   Saver* s = reinterpret_cast<Saver*>(arg);
   ParsedInternalKey parsed_key;
@@ -283,6 +297,8 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   const Comparator* ucmp = vset_->icmp_.user_comparator();
 
   // Search level-0 in order from newest to oldest.
+  // 对于level 0，文件可能有重叠，找到所有和user_key有重叠的文件，
+  // 然后根据时间顺序从最新的文件依次处理
   std::vector<FileMetaData*> tmp;
   tmp.reserve(files_[0].size());
   for (uint32_t i = 0; i < files_[0].size(); i++) {
@@ -302,6 +318,8 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   }
 
   // Search other levels.
+  // 对于level>0，leveldb保证sstable文件之间不会有重叠，
+  // 所以处理逻辑有别于level 0，直接根据ikey定位到sstable文件即可
   for (int level = 1; level < config::kNumLevels; level++) {
     size_t num_files = files_[level].size();
     if (num_files == 0) continue;
@@ -321,6 +339,7 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   }
 }
 
+// 当Get操作直接搜寻memtable没有命中时，就需要调用Version::Get()函数从磁盘load数据文件并查找
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
                     std::string* value, GetStats* stats) {
   stats->seek_file = nullptr;
@@ -398,7 +417,11 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
 
   return state.found ? state.s : Status::NotFound(Slice());
 }
-
+// Stat表明在指定key range查找key时，都要先seek此文件，才能在后续的sstable文件中找到key。
+// 该函数是将stat记录的sstable文件的allowed_seeks减1，减到0就执行compaction。
+// 也就是说如果文件被seek的次数超过了限制，表明读取效率已经很低，需要执行compaction了。
+// 所以说allowed_seeks是对compaction流程的有一个优化
+// **变量allowed_seeks的值在sstable文件加入到version时确定,即VersionSet::Builder::Apply()函数 ** //
 bool Version::UpdateStats(const GetStats& stats) {
   FileMetaData* f = stats.seek_file;
   if (f != nullptr) {
@@ -461,18 +484,27 @@ void Version::Unref() {
   }
 }
 
+// 检查是否和指定level的文件有重合
 bool Version::OverlapInLevel(int level, const Slice* smallest_user_key,
                              const Slice* largest_user_key) {
   return SomeFileOverlapsRange(vset_->icmp_, (level > 0), files_[level],
                                smallest_user_key, largest_user_key);
 }
 
+// 该函数的调用链为：
+// DBImpl::RecoverLogFile/DBImpl::CompactMemTable 
+// -> DBImpl:: WriteLevel0Table
+// -> Version::PickLevelForMemTableOutput
+// 函数返回我们应该在哪个level上放置新的memtable compaction,
+// 这个compaction覆盖了范围[smallest_user_key,largest_user_key]
 int Version::PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                         const Slice& largest_user_key) {
   int level = 0;
-  if (!OverlapInLevel(0, &smallest_user_key, &largest_user_key)) {
+  if (!OverlapInLevel(0, &smallest_user_key, &largest_user_key)) {  //level0 无重合
     // Push to next level if there is no overlap in next level,
     // and the #bytes overlapping in the level after that are limited.
+    // 如果下一层没有重叠，就压到下一层
+    // 
     InternalKey start(smallest_user_key, kMaxSequenceNumber, kValueTypeForSeek);
     InternalKey limit(largest_user_key, 0, static_cast<ValueType>(0));
     std::vector<FileMetaData*> overlaps;
@@ -495,11 +527,13 @@ int Version::PickLevelForMemTableOutput(const Slice& smallest_user_key,
 }
 
 // Store in "*inputs" all files in "level" that overlap [begin,end]
+// 它在指定level中找出和[begin, end]有重合的sstable文件
 void Version::GetOverlappingInputs(int level, const InternalKey* begin,
                                    const InternalKey* end,
                                    std::vector<FileMetaData*>* inputs) {
   assert(level >= 0);
   assert(level < config::kNumLevels);
+  // S1 首先根据参数初始化查找变量
   inputs->clear();
   Slice user_begin, user_end;
   if (begin != nullptr) {
@@ -509,6 +543,8 @@ void Version::GetOverlappingInputs(int level, const InternalKey* begin,
     user_end = end->user_key();
   }
   const Comparator* user_cmp = vset_->icmp_.user_comparator();
+  // S2 遍历该层的sstable文件，比较sstable的{minkey,max key}和传入的[begin, end]，
+  //    如果有重合就记录文件到@inputs中，需要对level 0做特殊处理。
   for (size_t i = 0; i < files_[level].size();) {
     FileMetaData* f = files_[level][i++];
     const Slice file_start = f->smallest.user_key();
@@ -518,7 +554,7 @@ void Version::GetOverlappingInputs(int level, const InternalKey* begin,
     } else if (end != nullptr && user_cmp->Compare(file_start, user_end) > 0) {
       // "f" is completely after specified range; skip it
     } else {
-      inputs->push_back(f);
+      inputs->push_back(f); // 有重合，记录
       if (level == 0) {
         // Level-0 files may overlap each other.  So check if the newly
         // added file has expanded the range.  If so, restart search.
