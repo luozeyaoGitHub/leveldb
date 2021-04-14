@@ -190,6 +190,7 @@ class VersionSet {
       EXCLUSIVE_LOCKS_REQUIRED(mu);
 
   // Recover the last saved descriptor from persistent storage.
+  // 恢复函数，从磁盘恢复最后保存的元信息
   Status Recover(bool* save_manifest);
 
   // Return the current version.
@@ -226,6 +227,7 @@ class VersionSet {
   }
 
   // Mark the specified file number as used.
+  // 标记指定的文件编号已经被使用了
   void MarkFileNumberUsed(uint64_t number);
 
   // Return the current log file number.
