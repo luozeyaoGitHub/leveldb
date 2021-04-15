@@ -11,6 +11,9 @@
 namespace leveldb {
 
 namespace {
+  // MergingIterator是一个合并迭代器，它内部使用了一组自Iterator，保存在其成员数组children_中。
+  // 如上面的函数NewInternalIterator，包括memtable，immutable memtable，以及各sstable文件；
+  // 它所做的就是根据调用者指定的key和sequence，从这些Iterator中找到合适的记录。
 class MergingIterator : public Iterator {
  public:
   MergingIterator(const Comparator* comparator, Iterator** children, int n)
@@ -60,20 +63,24 @@ class MergingIterator : public Iterator {
     // true for all of the non-current_ children since current_ is
     // the smallest child and key() == current_->key().  Otherwise,
     // we explicitly position the non-current_ children.
+    // 确保所有的子Iterator都定位在key()之后.
+    // 如果我们在正向移动，对于除current_外的所有子Iterator这点已然成立
+    // 因为current_是最小的子Iterator，并且key() = current_->key()。
+    // 否则，我们需要明确设置其它的子Iterator
     if (direction_ != kForward) {
-      for (int i = 0; i < n_; i++) {
+      for (int i = 0; i < n_; i++) {  // 把所有current之外的Iterator定位到key()之后
         IteratorWrapper* child = &children_[i];
         if (child != current_) {
           child->Seek(key());
           if (child->Valid() &&
               comparator_->Compare(key(), child->key()) == 0) {
-            child->Next();
+            child->Next(); // key等于current_->key()的，再向后移动一位
           }
         }
       }
       direction_ = kForward;
     }
-
+    // current也向后移一位，然后再查找key最小的Iterator
     current_->Next();
     FindSmallest();
   }
@@ -86,6 +93,10 @@ class MergingIterator : public Iterator {
     // true for all of the non-current_ children since current_ is
     // the largest child and key() == current_->key().  Otherwise,
     // we explicitly position the non-current_ children.
+    // 确保所有的子Iterator都定位在key()之前.
+    // 如果我们在逆向移动，对于除current_外的所有子Iterator这点已然成立
+    // 因为current_是最大的，并且key() = current_->key()
+    // 否则，我们需要明确设置其它的子Iterator
     if (direction_ != kReverse) {
       for (int i = 0; i < n_; i++) {
         IteratorWrapper* child = &children_[i];
@@ -93,16 +104,18 @@ class MergingIterator : public Iterator {
           child->Seek(key());
           if (child->Valid()) {
             // Child is at first entry >= key().  Step back one to be < key()
+            // child位于>=key()的第一个entry上,prev移动一位到 < key().
             child->Prev();
           } else {
             // Child has no entries >= key().  Position at last entry.
+            // child所有的entry都 < key(),直接seek到last即可.
             child->SeekToLast();
           }
         }
       }
       direction_ = kReverse;
     }
-
+    // current也向前移一位，然后再查找key最大的Iterator
     current_->Prev();
     FindLargest();
   }
@@ -119,7 +132,7 @@ class MergingIterator : public Iterator {
 
   Status status() const override {
     Status status;
-    for (int i = 0; i < n_; i++) {
+    for (int i = 0; i < n_; i++) { // 只有所有内部Iterator都ok时，才返回ok
       status = children_[i].status();
       if (!status.ok()) {
         break;
@@ -130,6 +143,7 @@ class MergingIterator : public Iterator {
 
  private:
   // Which direction is the iterator moving?
+  // 两个移动方向：kForward，向前移动；kReverse，向后移动。
   enum Direction { kForward, kReverse };
 
   void FindSmallest();
@@ -145,6 +159,7 @@ class MergingIterator : public Iterator {
   Direction direction_;
 };
 
+// FindSmallest从0开始向后遍历内部Iterator数组，找到key最小的Iterator，并设置到current_；
 void MergingIterator::FindSmallest() {
   IteratorWrapper* smallest = nullptr;
   for (int i = 0; i < n_; i++) {
@@ -159,7 +174,7 @@ void MergingIterator::FindSmallest() {
   }
   current_ = smallest;
 }
-
+// FindLargest从最后一个向前遍历内部Iterator数组，找到key最大的Iterator，并设置到current_;
 void MergingIterator::FindLargest() {
   IteratorWrapper* largest = nullptr;
   for (int i = n_ - 1; i >= 0; i--) {

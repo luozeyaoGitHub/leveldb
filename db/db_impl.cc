@@ -148,7 +148,12 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       manual_compaction_(nullptr),
       versions_(new VersionSet(dbname_, &options_, table_cache_,
                                &internal_comparator_)) {}
-
+  
+  // S1 等待后台compaction任务结束
+  // S2 释放db文件锁，<dbname>/lock文件
+  // S3 删除VersionSet对象，并释放MemTable对象
+  // S4 删除log相关以及TableCache对象
+  // S5 删除options的block_cache以及info_log对象
 DBImpl::~DBImpl() {
   // Wait for background work to finish.
   mutex_.Lock();
@@ -236,42 +241,46 @@ void DBImpl::RemoveObsoleteFiles() {
   }
 
   // Make a set of all of the live files
+  // S1 首先，确保不会删除pending文件，将versionset正在使用的所有文件加入到live中。
   std::set<uint64_t> live = pending_outputs_;
   versions_->AddLiveFiles(&live);
 
+  // S2 列举db的所有文件
   std::vector<std::string> filenames;
   env_->GetChildren(dbname_, &filenames);  // Ignoring errors on purpose
+  // S3 遍历所有列举的文件，根据文件类型，分别处理
   uint64_t number;
   FileType type;
   std::vector<std::string> files_to_delete;
   for (std::string& filename : filenames) {
     if (ParseFileName(filename, &number, &type)) {
-      bool keep = true;
+      bool keep = true; //  false表示是过期文件
       switch (type) {
-        case kLogFile:
+        case kLogFile: // S3.1 kLogFile，log文件，根据log编号判断是否过期
           keep = ((number >= versions_->LogNumber()) ||
                   (number == versions_->PrevLogNumber()));
           break;
-        case kDescriptorFile:
+        case kDescriptorFile: // S3.2 kDescriptorFile，MANIFEST文件，根据versionset记录的编号判断
           // Keep my manifest file, and any newer incarnations'
           // (in case there is a race that allows other incarnations)
           keep = (number >= versions_->ManifestFileNumber());
           break;
-        case kTableFile:
+        case kTableFile: // S3.3 sstable文件，只要在live中就不能删除
           keep = (live.find(number) != live.end());
           break;
-        case kTempFile:
+        case kTempFile: // S3.4 kTempFile，如果是正在写的文件，只要在live中就不能删除
           // Any temp files that are currently being written to must
           // be recorded in pending_outputs_, which is inserted into "live"
           keep = (live.find(number) != live.end());
           break;
+        // S3.5 kCurrentFile,kDBLockFile, kInfoLogFile，不能删除
         case kCurrentFile:
         case kDBLockFile:
         case kInfoLogFile:
           keep = true;
           break;
       }
-
+      // S3.6 如果keep为false，表明需要删除文件，如果是table还要从cache中删除
       if (!keep) {
         files_to_delete.push_back(std::move(filename));
         if (type == kTableFile) {
@@ -396,6 +405,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   return Status::OK();
 }
 
+// 该函数打开指定的log文件，回放日志。期间可能会执行compaction，生产新的level 0sstable文件，记录文件变动到edit中
 Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
                               bool* save_manifest, VersionEdit* edit,
                               SequenceNumber* max_sequence) {
@@ -415,6 +425,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   mutex_.AssertHeld();
 
   // Open the log file
+  // S1 打开log文件返回SequentialFile*file，出错就返回，否则向下执行S2
   std::string fname = LogFileName(dbname_, log_number);
   SequentialFile* file;
   Status status = env_->NewSequentialFile(fname, &file);
@@ -424,6 +435,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   }
 
   // Create the log reader.
+  // S2 根据log文件句柄file创建log::Reader，准备读取log
   LogReporter reporter;
   reporter.env = env_;
   reporter.info_log = options_.info_log;
@@ -438,24 +450,25 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       (unsigned long long)log_number);
 
   // Read all the records and add to a memtable
+  // S3 依次读取所有的log记录，并插入到新生成的memtable中.这里使用到了批量更新接口WriteBatch
   std::string scratch;
   Slice record;
   WriteBatch batch;
   int compactions = 0;
   MemTable* mem = nullptr;
-  while (reader.ReadRecord(&record, &scratch) && status.ok()) {
-    if (record.size() < 12) {
+  while (reader.ReadRecord(&record, &scratch) && status.ok()) { // 读取全部log
+    if (record.size() < 12) { // log数据错误，不满足最小长度12
       reporter.Corruption(record.size(),
                           Status::Corruption("log record too small"));
       continue;
     }
-    WriteBatchInternal::SetContents(&batch, record);
+    WriteBatchInternal::SetContents(&batch, record); // log内容设置到WriteBatch中
 
-    if (mem == nullptr) {
+    if (mem == nullptr) {  // 创建memtable
       mem = new MemTable(internal_comparator_);
       mem->Ref();
     }
-    status = WriteBatchInternal::InsertInto(&batch, mem);
+    status = WriteBatchInternal::InsertInto(&batch, mem); // 插入到memtable中
     MaybeIgnoreError(&status);
     if (!status.ok()) {
       break;
@@ -463,14 +476,15 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
     const SequenceNumber last_seq = WriteBatchInternal::Sequence(&batch) +
                                     WriteBatchInternal::Count(&batch) - 1;
     if (last_seq > *max_sequence) {
-      *max_sequence = last_seq;
+      *max_sequence = last_seq; // 更新max sequence
     }
-
+    // 如果mem的内存超过设置值，则执行compaction，如果compaction出错，
+    // 立刻返回错误，DB::Open失败
     if (mem->ApproximateMemoryUsage() > options_.write_buffer_size) {
       compactions++;
       *save_manifest = true;
       status = WriteLevel0Table(mem, edit, nullptr);
-      mem->Unref();
+      mem->Unref(); // 释放当前memtable
       mem = nullptr;
       if (!status.ok()) {
         // Reflect errors immediately so that conditions like full
@@ -503,12 +517,12 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       }
     }
   }
-
+  // S4 如果mem != nullptr，说明还需要dump到新的sstable文件中
   if (mem != nullptr) {
     // mem did not get reused; compact it.
     if (status.ok()) {
       *save_manifest = true;
-      status = WriteLevel0Table(mem, edit, nullptr);
+      status = WriteLevel0Table(mem, edit, nullptr); // 如果compaction出错，立刻返回错
     }
     mem->Unref();
   }
@@ -673,6 +687,7 @@ void DBImpl::RecordBackgroundError(const Status& s) {
   }
 }
 
+// 如果需要compaction，就启动后台线程执行compaction操作
 void DBImpl::MaybeScheduleCompaction() {
   mutex_.AssertHeld();
   if (background_compaction_scheduled_) {
@@ -1076,6 +1091,7 @@ struct IterState {
       : mu(mutex), version(version), mem(mem), imm(imm) {}
 };
 
+  // 对注册的对象做一下Unref操作
 static void CleanupIteratorState(void* arg1, void* arg2) {
   IterState* state = reinterpret_cast<IterState*>(arg1);
   state->mu->Lock();
@@ -1088,6 +1104,7 @@ static void CleanupIteratorState(void* arg1, void* arg2) {
 
 }  // anonymous namespace
 
+// 收集所有能用到的iterator，生产一个Merging Iterator。这包括MemTable，Immutable MemTable，以及各sstable
 Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
                                       SequenceNumber* latest_snapshot,
                                       uint32_t* seed) {
@@ -1107,6 +1124,7 @@ Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
       NewMergingIterator(&internal_comparator_, &list[0], list.size());
   versions_->current()->Ref();
 
+  // 注册清理机制
   IterState* cleanup = new IterState(&mutex_, mem_, imm_, versions_->current());
   internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, nullptr);
 
@@ -1129,6 +1147,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   Status s;
+  // S1 锁mutex，防止并发，如果指定option则尝试获取snapshot；然后增加MemTable的引用值。
   MutexLock l(&mutex_);
   SequenceNumber snapshot;
   if (options.snapshot != nullptr) {
@@ -1144,26 +1163,28 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Ref();
   if (imm != nullptr) imm->Ref();
   current->Ref();
-
+  
+  // S2 从sstable文件和MemTable中读取时，释放锁mutex；之后再次锁mutex
   bool have_stat_update = false;
   Version::GetStats stats;
-
   // Unlock while reading from files and memtables
   {
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
+    // 先从memtable中查询，再从immutable memtable中查询
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
       // Done
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
       // Done
-    } else {
+    } else { // 需要从sstable文件中查询
       s = current->Get(options, lkey, value, &stats);
-      have_stat_update = true;
+      have_stat_update = true; // 记录之，用于compaction
     }
     mutex_.Lock();
   }
-
+  // S3 如果是从sstable文件查询出来的，检查是否需要做compaction。
+  //    最后把MemTable的引用计数减1
   if (have_stat_update && current->UpdateStats(stats)) {
     MaybeScheduleCompaction();
   }
@@ -1172,7 +1193,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   current->Unref();
   return s;
 }
-
+// 通过该函数生产了一个Iterator*对象，调用这就可以基于该对象遍历db内容了
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
   SequenceNumber latest_snapshot;
   uint32_t seed;
@@ -1542,6 +1563,10 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
 
 Snapshot::~Snapshot() = default;
 
+  // S1 获取dbname目录的文件列表到filenames中，如果为空则直接返回，否则进入S2。
+  // S2 锁文件<dbname>/lock，如果锁成功就执行S3
+  // S3 遍历filenames文件列表，过滤掉lock文件，依次调用DeleteFile删除。
+  // S4 释放lock文件，并删除之，然后删除文件夹。
 Status DestroyDB(const std::string& dbname, const Options& options) {
   Env* env = options.env;
   std::vector<std::string> filenames;
