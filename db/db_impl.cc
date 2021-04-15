@@ -179,12 +179,14 @@ DBImpl::~DBImpl() {
 }
 
 Status DBImpl::NewDB() {
+  // S1首先生产DB元信息，设置comparator名，以及log文件编号、文件编号，以及seq no
   VersionEdit new_db;
   new_db.SetComparatorName(user_comparator()->Name());
   new_db.SetLogNumber(0);
   new_db.SetNextFile(2);
   new_db.SetLastSequence(0);
 
+  // S2 生产MANIFEST文件，将db元信息写入MANIFEST文件
   const std::string manifest = DescriptorFileName(dbname_, 1);
   WritableFile* file;
   Status s = env_->NewWritableFile(manifest, &file);
@@ -222,6 +224,8 @@ void DBImpl::MaybeIgnoreError(Status* s) const {
   }
 }
 
+// 垃圾回收函数，每次compaction和recovery之后都会有文件被废弃。
+// DeleteObsoleteFiles就是删除这些垃圾文件的，它在每次compaction和recovery完成之后被调用
 void DBImpl::RemoveObsoleteFiles() {
   mutex_.AssertHeld();
 
@@ -295,13 +299,16 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   // Ignore error from CreateDir since the creation of the DB is
   // committed only when the descriptor is created, and this directory
   // may already exist from a previous failed creation attempt.
+  // S1 创建目录，目录以db name命名，忽略任何创建错误，然后尝试获取db name/LOCK文件锁，失败则返回
   env_->CreateDir(dbname_);
   assert(db_lock_ == nullptr);
   Status s = env_->LockFile(LockFileName(dbname_), &db_lock_);
   if (!s.ok()) {
     return s;
   }
-
+  // S2 根据CURRENT文件是否存在，以及option参数执行检查。
+  //    如果文件不存在 & create_is_missing=true，则调用函数NewDB()创建；否则报错。
+  //    如果文件存在 & error_if_exists=true，则报错
   if (!env_->FileExists(CurrentFileName(dbname_))) {
     if (options_.create_if_missing) {
       Log(options_.info_log, "Creating DB %s since it was missing.",
@@ -320,11 +327,13 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
                                      "exists (error_if_exists is true)");
     }
   }
-
+  // S2 从已存在的db文件恢复db数据，根据CURRENT记录的MANIFEST文件读取db元信息
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
   }
+  // S4  尝试从所有比manifest文件中记录的log要新的log文件中恢复
+  //    （前一个版本可能会添加新的log文件，却没有记录在manifest中）
   SequenceNumber max_sequence(0);
 
   // Recover from all newer log files than the ones named in the
@@ -361,6 +370,10 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   }
 
   // Recover in the order in which the logs were generated
+  // S3 然后过滤出那些最近的更新log，前一个版本可能新加了这些log，但并没有记录在MANIFEST中。
+  //    然后依次根据时间顺序，调用DBImpl::RecoverLogFile()从旧到新回放这些操作log。
+  //    回放log时可能会修改db元信息，比如dump了新的level 0文件，
+  //    因此它将返回一个VersionEdit对象，记录db元信息的变动。
   std::sort(logs.begin(), logs.end());
   for (size_t i = 0; i < logs.size(); i++) {
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
@@ -375,6 +388,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
     versions_->MarkFileNumberUsed(logs[i]);
   }
 
+  // 更新VersionSet的sequence
   if (versions_->LastSequence() < max_sequence) {
     versions_->SetLastSequence(max_sequence);
   }
@@ -1482,9 +1496,9 @@ DB::~DB() = default;
 
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;
-
+  // S1 创建DBImpl对象，其后进入DBImpl::Recover()函数执行S2和S3
   DBImpl* impl = new DBImpl(options, dbname);
-  impl->mutex_.Lock();
+  impl->mutex_.Lock();  // 锁db
   VersionEdit edit;
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
@@ -1504,11 +1518,14 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->mem_->Ref();
     }
   }
+  // S4 如果DBImpl::Recover()返回成功，就执行VersionSet::LogAndApply()应用VersionEdit，
+  //    并保存当前的DB信息到新的MANIFEST文件中
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
     edit.SetLogNumber(impl->logfile_number_);
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
   }
+  // S5 最后删除一些过期文件，并检查是否需要执行compaction，如果需要，就启动后台线程执行
   if (s.ok()) {
     impl->RemoveObsoleteFiles();
     impl->MaybeScheduleCompaction();
