@@ -23,13 +23,14 @@ class Arena {
   ~Arena();
 
   // Return a pointer to a newly allocated memory block of "bytes" bytes.
+  // 返回一个新分配内存块的指针
   char* Allocate(size_t bytes);
 
   // Allocate memory with the normal alignment guarantees provided by malloc.
   char* AllocateAligned(size_t bytes);
 
-  // Returns an estimate of the total memory usage of data allocated
-  // by the arena.
+  // Returns an estimate of the total memory usage of data allocated by the arena.
+  // 返回当前内存池的使用量
   size_t MemoryUsage() const {
     return memory_usage_.load(std::memory_order_relaxed);
   }
@@ -43,10 +44,11 @@ class Arena {
   size_t alloc_bytes_remaining_;
 
   // Array of new[] allocated memory blocks
+  // 内存池中内存块指针数组
   std::vector<char*> blocks_;
 
   // Total memory usage of the arena.
-  //
+  // 总内存使用量
   // TODO(costan): This member is accessed via atomics, but the others are
   //               accessed without any locking. Is this OK?
   std::atomic<size_t> memory_usage_;

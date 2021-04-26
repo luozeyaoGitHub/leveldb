@@ -16,16 +16,18 @@ Arena::~Arena() {
     delete[] blocks_[i];
   }
 }
-
+// 
 char* Arena::AllocateFallback(size_t bytes) {
   if (bytes > kBlockSize / 4) {
     // Object is more than a quarter of our block size.  Allocate it separately
     // to avoid wasting too much space in leftover bytes.
+    // 如果目标内存空间bytes大于内存块的1/4，则分配一个新的bytes大小的数据块给当前对象
     char* result = AllocateNewBlock(bytes);
     return result;
   }
 
   // We waste the remaining space in the current block.
+  // 否则就分配kBlockSize即4096bytes大小的内存块
   alloc_ptr_ = AllocateNewBlock(kBlockSize);
   alloc_bytes_remaining_ = kBlockSize;
 
@@ -49,12 +51,14 @@ char* Arena::AllocateAligned(size_t bytes) {
     alloc_bytes_remaining_ -= needed;
   } else {
     // AllocateFallback always returned aligned memory
+    // 总是返回内存对齐的新内存地址
     result = AllocateFallback(bytes);
   }
   assert((reinterpret_cast<uintptr_t>(result) & (align - 1)) == 0);
   return result;
 }
 
+// 分配指定大小的内存块
 char* Arena::AllocateNewBlock(size_t block_bytes) {
   char* result = new char[block_bytes];
   blocks_.push_back(result);
